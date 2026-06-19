@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram nutrition bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/opt/nutrition-bot
+EnvironmentFile=/opt/nutrition-bot/.env
+ExecStart=/opt/nutrition-bot/.venv/bin/python /opt/nutrition-bot/bot.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
