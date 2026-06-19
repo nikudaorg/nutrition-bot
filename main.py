@@ -34,6 +34,11 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
 BOT_TIMEZONE = os.environ.get("BOT_TIMEZONE", "Asia/Jerusalem")
+ALLOWED_USER_IDS = {
+    int(value.strip())
+    for value in os.environ["ALLOWED_USER_IDS"].split(",")
+    if value.strip()
+}
 
 TZ = ZoneInfo(BOT_TIMEZONE)
 
@@ -87,7 +92,19 @@ def format_number(value: float) -> str:
 
 
 def ensure_data_shape(data: dict[str, Any]) -> dict[str, Any]:
-    data.setdefault("users", {})
+    data.setdefault("entries", [])
+    data.setdefault("starts", [])
+    data.setdefault("goals", {})
+    data.setdefault("pending_goals", {})
+    legacy_users = data.pop("users", None)
+    if isinstance(legacy_users, dict):
+        for legacy_bucket in legacy_users.values():
+            if not isinstance(legacy_bucket, dict):
+                continue
+            data["entries"].extend(legacy_bucket.get("entries", []))
+            data["starts"].extend(legacy_bucket.get("starts", []))
+            for key, value in legacy_bucket.get("goals", {}).items():
+                data["goals"].setdefault(key, value)
     return data
 
 
@@ -96,7 +113,7 @@ class JsonStore:
         self.path = path
         self.lock = threading.Lock()
         if not self.path.exists():
-            self._write({"users": {}})
+            self._write(ensure_data_shape({}))
 
     def _read(self) -> dict[str, Any]:
         with self.path.open("r", encoding="utf-8") as handle:
@@ -123,22 +140,35 @@ class JsonStore:
 store = JsonStore(DATA_FILE)
 
 
-def user_bucket(data: dict[str, Any], chat_id: int) -> dict[str, Any]:
-    users = data.setdefault("users", {})
-    bucket = users.setdefault(
-        str(chat_id),
-        {
-            "entries": [],
-            "starts": [],
-            "goals": {},
-            "pending_goal": None,
-        },
-    )
-    bucket.setdefault("entries", [])
-    bucket.setdefault("starts", [])
-    bucket.setdefault("goals", {})
-    bucket.setdefault("pending_goal", None)
-    return bucket
+def pending_goal_for(data: dict[str, Any], user_id: int) -> str | None:
+    return data.get("pending_goals", {}).get(str(user_id))
+
+
+def set_pending_goal(data: dict[str, Any], user_id: int, nutrient: str | None) -> None:
+    pending_goals = data.setdefault("pending_goals", {})
+    user_key = str(user_id)
+    if nutrient is None:
+        pending_goals.pop(user_key, None)
+    else:
+        pending_goals[user_key] = nutrient
+
+
+def is_authorized_user(user_id: int | None) -> bool:
+    return user_id is not None and user_id in ALLOWED_USER_IDS
+
+
+def reject_if_unauthorized(message: types.Message) -> bool:
+    if is_authorized_user(message.from_user.id if message.from_user else None):
+        return False
+    bot.reply_to(message, "You are not allowed to use this bot.")
+    return True
+
+
+def reject_callback_if_unauthorized(call: types.CallbackQuery) -> bool:
+    if is_authorized_user(call.from_user.id if call.from_user else None):
+        return False
+    bot.answer_callback_query(call.id, "You are not allowed to use this bot.", show_alert=True)
+    return True
 
 
 class Nutrients(BaseModel):
@@ -366,9 +396,9 @@ def sum_entries(entries: list[dict[str, Any]]) -> dict[str, float]:
     return totals
 
 
-def get_windows(chat_data: dict[str, Any], reference: datetime) -> tuple[list[dict[str, Any]], list[dict[str, Any]], datetime | None]:
+def get_windows(data: dict[str, Any], reference: datetime) -> tuple[list[dict[str, Any]], list[dict[str, Any]], datetime | None]:
     entries = []
-    for entry in chat_data["entries"]:
+    for entry in data["entries"]:
         eaten_at = parse_iso(entry["eaten_at_iso"])
         if eaten_at <= reference:
             entries.append((eaten_at, entry))
@@ -376,7 +406,7 @@ def get_windows(chat_data: dict[str, Any], reference: datetime) -> tuple[list[di
     last_24h_start = reference - timedelta(hours=24)
     entries_24h = [entry for eaten_at, entry in entries if eaten_at >= last_24h_start]
 
-    starts = sorted((parse_iso(value) for value in chat_data["starts"]), reverse=True)
+    starts = sorted((parse_iso(value) for value in data["starts"]), reverse=True)
     active_start = next((value for value in starts if value <= reference), None)
     entries_since_start = [entry for eaten_at, entry in entries if active_start and eaten_at >= active_start]
 
@@ -391,12 +421,12 @@ def goal_text(value: float, key: str, goals: dict[str, Any]) -> str:
     return f"{format_number(value)} / {format_number(float(goal))} {unit}"
 
 
-def render_report(chat_data: dict[str, Any], expanded: bool) -> str:
+def render_report(data: dict[str, Any], expanded: bool) -> str:
     reference = now_local()
-    entries_24h, entries_since_start, active_start = get_windows(chat_data, reference)
+    entries_24h, entries_since_start, active_start = get_windows(data, reference)
     totals_24h = sum_entries(entries_24h)
     totals_since_start = sum_entries(entries_since_start)
-    goals = chat_data.get("goals", {})
+    goals = data.get("goals", {})
 
     keys = list(NUTRIENT_META) if expanded else BASIC_REPORT_KEYS
     header = [
@@ -430,11 +460,11 @@ def report_markup(expanded: bool) -> types.InlineKeyboardMarkup:
     return keyboard
 
 
-def goals_markup(chat_data: dict[str, Any]) -> types.InlineKeyboardMarkup:
+def goals_markup(data: dict[str, Any]) -> types.InlineKeyboardMarkup:
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     buttons = []
     for key, label, unit in NUTRIENTS:
-        goal = chat_data.get("goals", {}).get(key)
+        goal = data.get("goals", {}).get(key)
         suffix = f" ({format_number(float(goal))} {unit})" if goal is not None else ""
         buttons.append(types.InlineKeyboardButton(f"{label}{suffix}", callback_data=f"goal:{key}"))
     keyboard.add(*buttons)
@@ -442,11 +472,11 @@ def goals_markup(chat_data: dict[str, Any]) -> types.InlineKeyboardMarkup:
     return keyboard
 
 
-def clear_goals_markup(chat_data: dict[str, Any]) -> types.InlineKeyboardMarkup:
+def clear_goals_markup(data: dict[str, Any]) -> types.InlineKeyboardMarkup:
     keyboard = types.InlineKeyboardMarkup(row_width=2)
     buttons = []
     for key, label, unit in NUTRIENTS:
-        if chat_data.get("goals", {}).get(key) is not None:
+        if data.get("goals", {}).get(key) is not None:
             buttons.append(types.InlineKeyboardButton(f"Remove {label}", callback_data=f"goalclear:{key}"))
     if buttons:
         keyboard.add(*buttons)
@@ -474,10 +504,9 @@ class StoredEntry:
         }
 
 
-def store_entry(chat_id: int, entry: StoredEntry) -> None:
+def store_entry(entry: StoredEntry) -> None:
     def updater(data: dict[str, Any]) -> None:
-        bucket = user_bucket(data, chat_id)
-        bucket["entries"].append(entry.to_dict())
+        data["entries"].append(entry.to_dict())
 
     store.update(updater)
 
@@ -491,6 +520,8 @@ def send_processing_error(chat_id: int, exc: Exception) -> None:
 
 
 def handle_meal_message(message: types.Message) -> None:
+    if reject_if_unauthorized(message):
+        return
     try:
         photo_meta = save_photo(message) if message.content_type == "photo" else None
         content_text = build_meal_input_text(message, photo_meta is not None)
@@ -502,7 +533,7 @@ def handle_meal_message(message: types.Message) -> None:
             photo=photo_meta,
             estimate=estimate,
         )
-        store_entry(message.chat.id, entry)
+        store_entry(entry)
 
         summary_lines = [
             "<b>Meal recorded</b>",
@@ -521,6 +552,8 @@ def handle_meal_message(message: types.Message) -> None:
 
 @bot.message_handler(commands=["start"])
 def handle_start_command(message: types.Message) -> None:
+    if reject_if_unauthorized(message):
+        return
     command_text = message.text or "/start"
     raw_arg = command_text.split(maxsplit=1)[1].strip() if " " in command_text else ""
     reference = datetime.fromtimestamp(message.date, TZ)
@@ -535,8 +568,7 @@ def handle_start_command(message: types.Message) -> None:
         parsed_time, source = reference, "message time"
 
     def updater(data: dict[str, Any]) -> str:
-        bucket = user_bucket(data, message.chat.id)
-        bucket["starts"].append(isoformat_local(parsed_time))
+        data["starts"].append(isoformat_local(parsed_time))
         return isoformat_local(parsed_time)
 
     stored_value = store.update(updater)
@@ -554,11 +586,12 @@ def handle_start_command(message: types.Message) -> None:
 
 @bot.message_handler(commands=["remove_start"])
 def handle_remove_start(message: types.Message) -> None:
+    if reject_if_unauthorized(message):
+        return
     def updater(data: dict[str, Any]) -> str | None:
-        bucket = user_bucket(data, message.chat.id)
-        if not bucket["starts"]:
+        if not data["starts"]:
             return None
-        return bucket["starts"].pop()
+        return data["starts"].pop()
 
     removed = store.update(updater)
     if removed is None:
@@ -572,22 +605,24 @@ def handle_remove_start(message: types.Message) -> None:
 
 @bot.message_handler(commands=["check"])
 def handle_check(message: types.Message) -> None:
+    if reject_if_unauthorized(message):
+        return
     data = store.get_data()
-    chat_data = user_bucket(data, message.chat.id)
     bot.send_message(
         message.chat.id,
-        render_report(chat_data, expanded=False),
+        render_report(data, expanded=False),
         reply_markup=report_markup(expanded=False),
     )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("check:"))
 def handle_check_toggle(call: types.CallbackQuery) -> None:
+    if reject_callback_if_unauthorized(call):
+        return
     expanded = call.data == "check:more"
     data = store.get_data()
-    chat_data = user_bucket(data, call.message.chat.id)
     bot.edit_message_text(
-        render_report(chat_data, expanded=expanded),
+        render_report(data, expanded=expanded),
         call.message.chat.id,
         call.message.message_id,
         reply_markup=report_markup(expanded=expanded),
@@ -597,37 +632,38 @@ def handle_check_toggle(call: types.CallbackQuery) -> None:
 
 @bot.message_handler(commands=["goals"])
 def handle_goals(message: types.Message) -> None:
+    if reject_if_unauthorized(message):
+        return
     data = store.get_data()
-    chat_data = user_bucket(data, message.chat.id)
     bot.send_message(
         message.chat.id,
         "<b>Goals</b>\nChoose a nutrient to set or update its goal.",
-        reply_markup=goals_markup(chat_data),
+        reply_markup=goals_markup(data),
     )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("goal:") or call.data.startswith("goalclear:"))
 def handle_goal_callbacks(call: types.CallbackQuery) -> None:
+    if reject_callback_if_unauthorized(call):
+        return
     if call.data == "goal:clear_menu":
         data = store.get_data()
-        chat_data = user_bucket(data, call.message.chat.id)
         bot.edit_message_text(
             "<b>Goals</b>\nChoose a goal to remove.",
             call.message.chat.id,
             call.message.message_id,
-            reply_markup=clear_goals_markup(chat_data),
+            reply_markup=clear_goals_markup(data),
         )
         bot.answer_callback_query(call.id)
         return
 
     if call.data == "goal:back":
         data = store.get_data()
-        chat_data = user_bucket(data, call.message.chat.id)
         bot.edit_message_text(
             "<b>Goals</b>\nChoose a nutrient to set or update its goal.",
             call.message.chat.id,
             call.message.message_id,
-            reply_markup=goals_markup(chat_data),
+            reply_markup=goals_markup(data),
         )
         bot.answer_callback_query(call.id)
         return
@@ -636,17 +672,15 @@ def handle_goal_callbacks(call: types.CallbackQuery) -> None:
         nutrient = call.data.split(":", 1)[1]
 
         def updater(data: dict[str, Any]) -> None:
-            bucket = user_bucket(data, call.message.chat.id)
-            bucket["goals"].pop(nutrient, None)
+            data["goals"].pop(nutrient, None)
 
         store.update(updater)
         data = store.get_data()
-        chat_data = user_bucket(data, call.message.chat.id)
         bot.edit_message_text(
             "<b>Goals</b>\nChoose a goal to remove.",
             call.message.chat.id,
             call.message.message_id,
-            reply_markup=clear_goals_markup(chat_data),
+            reply_markup=clear_goals_markup(data),
         )
         bot.answer_callback_query(call.id, f"Removed goal for {NUTRIENT_META[nutrient]['label']}")
         return
@@ -656,8 +690,7 @@ def handle_goal_callbacks(call: types.CallbackQuery) -> None:
     unit = NUTRIENT_META[nutrient]["unit"]
 
     def updater(data: dict[str, Any]) -> None:
-        bucket = user_bucket(data, call.message.chat.id)
-        bucket["pending_goal"] = nutrient
+        set_pending_goal(data, call.from_user.id, nutrient)
 
     store.update(updater)
     bot.answer_callback_query(call.id)
@@ -671,10 +704,11 @@ def handle_goal_callbacks(call: types.CallbackQuery) -> None:
 def handle_text_message(message: types.Message) -> None:
     if (message.text or "").startswith("/"):
         return
+    if reject_if_unauthorized(message):
+        return
 
     data = store.get_data()
-    chat_data = user_bucket(data, message.chat.id)
-    pending_goal = chat_data.get("pending_goal")
+    pending_goal = pending_goal_for(data, message.from_user.id)
     if pending_goal:
         raw_value = (message.text or "").strip().replace(",", ".")
         try:
@@ -686,9 +720,8 @@ def handle_text_message(message: types.Message) -> None:
             return
 
         def updater(data: dict[str, Any]) -> None:
-            bucket = user_bucket(data, message.chat.id)
-            bucket["goals"][pending_goal] = value
-            bucket["pending_goal"] = None
+            data["goals"][pending_goal] = value
+            set_pending_goal(data, message.from_user.id, None)
 
         store.update(updater)
         meta = NUTRIENT_META[pending_goal]
@@ -704,6 +737,8 @@ def handle_text_message(message: types.Message) -> None:
 @bot.message_handler(content_types=["photo"])
 def handle_photo_message(message: types.Message) -> None:
     if (message.caption or "").startswith("/"):
+        return
+    if reject_if_unauthorized(message):
         return
     handle_meal_message(message)
 
