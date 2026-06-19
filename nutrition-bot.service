@@ -8,7 +8,7 @@ Type=simple
 User=YOUR_USER
 WorkingDirectory=/opt/nutrition-bot
 EnvironmentFile=/opt/nutrition-bot/.env
-ExecStart=/opt/nutrition-bot/.venv/bin/python /opt/nutrition-bot/bot.py
+ExecStart=/opt/nutrition-bot/.venv/bin/python /opt/nutrition-bot/main.py
 Restart=always
 RestartSec=5
 

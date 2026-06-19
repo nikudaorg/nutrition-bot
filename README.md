@@ -25,12 +25,13 @@ Fill `.env` with:
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
 - `BOT_TIMEZONE`
+- `ALLOWED_USER_IDS`
 
 ## Run
 
 ```bash
 . .venv/bin/activate
-python bot.py
+python main.py
 ```
 
 ## Deploy with systemd
@@ -51,7 +52,8 @@ sudo systemctl status nutrition-bot.service
 ## Notes
 
 - Photos are stored in `photos/`.
-- Start-of-day records are per-chat.
+- Only Telegram users listed in `ALLOWED_USER_IDS` can use the bot.
+- Data is global and shared across allowed users.
 - Nutrient units:
   - calories: `kcal`
   - proteins, fats, carbohydrates, sugar, fibres: `g`
