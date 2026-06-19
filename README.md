@@ -7,7 +7,7 @@ Telegram bot for logging meals from free-form text and photos, estimating nutrie
 - Logs meal descriptions and optional photos.
 - Estimates meal time and nutrients with OpenAI.
 - Stores all data locally in `data.json`.
-- Supports `/check`, `/start`, `/remove_start`, and `/goals`.
+- Supports `/check`, `/begin`, `/remove_begin`, and `/goals`.
 - Includes a `systemd` unit for Linux VPS deployment.
 
 ## Setup

@@ -380,9 +380,9 @@ def estimate_meal(description: str, photo_path: Path | None) -> MealEstimate:
 
 def init_commands() -> None:
     commands = [
-        types.BotCommand("start", "Record the start of the day, optionally with a time"),
+        types.BotCommand("begin", "Record the start of the day, optionally with a time"),
         types.BotCommand("check", "Show nutrient totals"),
-        types.BotCommand("remove_start", "Remove the latest start-of-day record"),
+        types.BotCommand("remove_begin", "Remove the latest start-of-day record"),
         types.BotCommand("goals", "Set nutrient goals"),
     ]
     bot.set_my_commands(commands)
@@ -550,11 +550,11 @@ def handle_meal_message(message: types.Message) -> None:
         send_processing_error(message.chat.id, exc)
 
 
-@bot.message_handler(commands=["start"])
-def handle_start_command(message: types.Message) -> None:
+@bot.message_handler(commands=["begin"])
+def handle_begin_command(message: types.Message) -> None:
     if reject_if_unauthorized(message):
         return
-    command_text = message.text or "/start"
+    command_text = message.text or "/begin"
     raw_arg = command_text.split(maxsplit=1)[1].strip() if " " in command_text else ""
     reference = datetime.fromtimestamp(message.date, TZ)
 
@@ -584,8 +584,8 @@ def handle_start_command(message: types.Message) -> None:
     )
 
 
-@bot.message_handler(commands=["remove_start"])
-def handle_remove_start(message: types.Message) -> None:
+@bot.message_handler(commands=["remove_begin"])
+def handle_remove_begin(message: types.Message) -> None:
     if reject_if_unauthorized(message):
         return
     def updater(data: dict[str, Any]) -> str | None:
