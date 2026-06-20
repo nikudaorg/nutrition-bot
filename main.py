@@ -383,6 +383,7 @@ def init_commands() -> None:
         types.BotCommand("begin", "Record the start of the day, optionally with a time"),
         types.BotCommand("check", "Show nutrient totals"),
         types.BotCommand("remove_begin", "Remove the latest start-of-day record"),
+        types.BotCommand("remove_meal", "Remove the latest meal record"),
         types.BotCommand("goals", "Set nutrient goals"),
     ]
     bot.set_my_commands(commands)
@@ -600,6 +601,35 @@ def handle_remove_begin(message: types.Message) -> None:
     bot.reply_to(
         message,
         f"<b>Removed</b>\n<i>Start of day:</i> {escape(parse_iso(removed).strftime('%Y-%m-%d %H:%M %Z'))}",
+    )
+
+
+@bot.message_handler(commands=["remove_meal"])
+def handle_remove_meal(message: types.Message) -> None:
+    if reject_if_unauthorized(message):
+        return
+
+    def updater(data: dict[str, Any]) -> dict[str, Any] | None:
+        if not data["entries"]:
+            return None
+        return data["entries"].pop()
+
+    removed = store.update(updater)
+    if removed is None:
+        bot.reply_to(message, "No meal record exists yet.")
+        return
+
+    removed_time = parse_iso(removed["eaten_at_iso"]).strftime("%Y-%m-%d %H:%M %Z")
+    removed_summary = removed.get("description_summary") or removed.get("description") or "Meal"
+    bot.reply_to(
+        message,
+        "\n".join(
+            [
+                "<b>Removed meal</b>",
+                f"<i>Time:</i> {escape(removed_time)}",
+                f"<i>Summary:</i> {escape(removed_summary)}",
+            ]
+        ),
     )
 
 
